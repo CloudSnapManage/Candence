@@ -88,6 +88,13 @@ def _to_hex(r: int, g: int, b: int) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
+    value = hex_color.lstrip("#")
+    if len(value) != 6:
+        return (140, 147, 168)
+    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+
+
 def _luminance(r: int, g: int, b: int) -> float:
     return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
 
@@ -98,10 +105,7 @@ def _saturation(r: int, g: int, b: int) -> float:
 
 
 def _tone(hex_color: str, saturation_scale: float = 1.0, lightness_scale: float = 1.0) -> str:
-    value = hex_color.lstrip("#")
-    if len(value) != 6:
-        return "#8C93A8"
-    r, g, b = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+    r, g, b = _hex_to_rgb(hex_color)
     grey = 0.299 * r + 0.587 * g + 0.114 * b
     r = grey + (r - grey) * saturation_scale
     g = grey + (g - grey) * saturation_scale
@@ -145,12 +149,10 @@ def extract_palette(image_url: Optional[str], clusters: int = 14) -> Dict[str, A
         for candidate in candidates:
             if len(picked) >= 5:
                 break
-            r1, g1, b1 = (int(candidate["hex"][i:i + 2], 16) for i in (1, 3, 5))
+            r1, g1, b1 = _hex_to_rgb(candidate["hex"])
             if all(
-                ((r1 - int(p["hex"][i:i + 2], 16)) ** 2
-                 + (g1 - int(p["hex"][i + 2:i + 4], 16)) ** 2
-                 + (b1 - int(p["hex"][i + 4:i + 6], 16)) ** 2) ** 0.5 >= 42
-                for p in picked
+                ((r1 - pr) ** 2 + (g1 - pg) ** 2 + (b1 - pb) ** 2) ** 0.5 >= 42
+                for pr, pg, pb in (_hex_to_rgb(p["hex"]) for p in picked)
             ):
                 picked.append(candidate)
 
@@ -795,17 +797,63 @@ def extract_video_id(url: str) -> Optional[str]:
     return None
 
 
+def get_cookie_file() -> Optional[str]:
+    """Retrieve or dynamically construct a Netscape cookies file for yt-dlp authentication."""
+    # 1. Direct path via COOKIES_FILE env var
+    cf = os.environ.get("COOKIES_FILE")
+    if cf and os.path.isfile(cf):
+        return cf
+
+    # 2. Raw cookie text via YOUTUBE_COOKIES env var (common for Render/Heroku)
+    yt_cookies = os.environ.get("YOUTUBE_COOKIES")
+    if yt_cookies and yt_cookies.strip():
+        tmp_path = "/tmp/youtube_cookies.txt"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(yt_cookies.strip())
+            return tmp_path
+        except Exception as exc:
+            print(f"[cookies] Failed to write temp cookie file: {exc}")
+
+    # 3. Base64 encoded cookie text via YOUTUBE_COOKIES_BASE64 env var
+    b64_cookies = os.environ.get("YOUTUBE_COOKIES_BASE64")
+    if b64_cookies and b64_cookies.strip():
+        tmp_path = "/tmp/youtube_cookies_b64.txt"
+        try:
+            import base64
+            decoded = base64.b64decode(b64_cookies.strip()).decode("utf-8")
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(decoded)
+            return tmp_path
+        except Exception as exc:
+            print(f"[cookies] Failed to decode base64 cookie file: {exc}")
+
+    # 4. Local cookies.txt or youtube_cookies.txt in project directories
+    for name in ("cookies.txt", "youtube_cookies.txt"):
+        local = os.path.join(APP_DIR, name)
+        if os.path.isfile(local):
+            return local
+        if os.path.isfile(name):
+            return os.path.abspath(name)
+
+    return None
+
+
 def extract_audio_data(youtube_url: str) -> Dict[str, Any]:
-    # Try multiple client fallbacks in order of resilience on cloud IPs
-    client_strategies = [
-        ["tv_downgraded", "mweb"],
-        ["web_embedded", "android"],
-        ["ios", "web"],
+    cookie_file = get_cookie_file()
+
+    # Mobile and music client configurations prioritized to bypass datacenter IP bot detection
+    client_strategies: List[Optional[List[str]]] = [
+        ["android_music", "android", "android_creator"],
+        ["android", "android_music"],
+        ["ios", "mweb"],
+        ["mweb", "android"],
+        None,  # Standard yt-dlp default fallback
     ]
 
     last_error: Optional[Exception] = None
     for clients in client_strategies:
-        ydl_opts = {
+        ydl_opts: Dict[str, Any] = {
             "format": "bestaudio/best",
             "skip_download": True,
             "writesubtitles": True,
@@ -815,20 +863,24 @@ def extract_audio_data(youtube_url: str) -> Dict[str, Any]:
             "no_warnings": True,
             "noplaylist": True,
             "nocheckcertificate": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": clients,
-                    "player_skip": ["webpage", "configs"],
-                }
-            },
             "http_headers": {
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                 ),
                 "Accept-Language": "en-US,en;q=0.9",
             },
         }
+
+        if cookie_file:
+            ydl_opts["cookiefile"] = cookie_file
+
+        if clients:
+            ydl_opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": clients,
+                }
+            }
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
