@@ -841,14 +841,15 @@ def get_cookie_file() -> Optional[str]:
 
 def extract_audio_data(youtube_url: str) -> Dict[str, Any]:
     cookie_file = get_cookie_file()
+    search_target = youtube_url if youtube_url.startswith("http") else f"ytsearch:{youtube_url}"
 
-    # Mobile and music client configurations prioritized to bypass datacenter IP bot detection
+    # Multiple client profiles designed for datacenter and cloud execution
     client_strategies: List[Optional[List[str]]] = [
+        ["web", "ios"],
         ["android_music", "android", "android_creator"],
-        ["android", "android_music"],
-        ["ios", "mweb"],
-        ["mweb", "android"],
-        None,  # Standard yt-dlp default fallback
+        ["ios", "web"],
+        ["android", "mweb"],
+        None,  # Standard yt-dlp fallback
     ]
 
     last_error: Optional[Exception] = None
@@ -884,8 +885,10 @@ def extract_audio_data(youtube_url: str) -> Dict[str, Any]:
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
+                info = ydl.extract_info(search_target, download=False)
                 if info:
+                    if "entries" in info and info["entries"]:
+                        info = info["entries"][0]
                     return info
         except Exception as e:
             last_error = e
@@ -1029,6 +1032,11 @@ async def resolve(url: str, request: Request) -> Dict[str, Any]:
 @app.get("/api/process")
 async def process(request: Request, url: str = Query(..., description="YouTube URL or demo id")):
     return await resolve(url, request)
+
+
+@app.get("/api/lyrics")
+async def lyrics_endpoint(request: Request, q: str = Query(..., description="Query string or YouTube URL")):
+    return await resolve(q, request)
 
 
 @app.post("/api/parse")
