@@ -1,6 +1,7 @@
-fastapi>=0.110.0
-uvicorn>=0.28.0
-yt-dlp>=2024.03.10
-Pillow>=10.0.0
-requests>=2.31.0
-pydantic>=2.0.0
+fastapi
+uvicorn
+yt-dlp>=2026.01.01
+deep-translator
+requests
+Pillow
+pydantic

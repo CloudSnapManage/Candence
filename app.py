@@ -775,27 +775,71 @@ def demo_payload(track: Dict[str, Any], request: Request) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# Resolver
+# Resolver & Extractor
 # --------------------------------------------------------------------------- #
 
-_CACHE: Dict[str, Dict[str, Any]] = {}
-YDL_OPTS = {
-    "format": "bestaudio/best",
-    "skip_download": True,
-    "writesubtitles": True,
-    "writeautomaticsub": True,
-    "subtitleslangs": ["en.*", "en"],
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-    "extract_flat": False,
-    "nocheckcertificate": True,
-}
+CACHE: Dict[str, Dict[str, Any]] = {}
 
 
-def _extract_blocking(url: str) -> Dict[str, Any]:
-    with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
-        return ydl.extract_info(url, download=False)
+def extract_video_id(url: str) -> Optional[str]:
+    patterns = [
+        r"(?:v=|\/)([0-9A-Za-z_-]{11})(?:[&?]|$)",
+        r"youtu\.be\/([0-9A-Za-z_-]{11})",
+        r"embed\/([0-9A-Za-z_-]{11})",
+        r"^([0-9A-Za-z_-]{11})$",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def extract_audio_data(youtube_url: str) -> Dict[str, Any]:
+    # Try multiple client fallbacks in order of resilience on cloud IPs
+    client_strategies = [
+        ["tv_downgraded", "mweb"],
+        ["web_embedded", "android"],
+        ["ios", "web"],
+    ]
+
+    last_error: Optional[Exception] = None
+    for clients in client_strategies:
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en.*", "en"],
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "nocheckcertificate": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": clients,
+                    "player_skip": ["webpage", "configs"],
+                }
+            },
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+                if info:
+                    return info
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise Exception(f"Failed to process video: {str(last_error)}")
 
 
 def _best_audio(info: Dict[str, Any]) -> Optional[str]:
@@ -833,11 +877,15 @@ async def resolve(url: str, request: Request) -> Dict[str, Any]:
     if lowered in {"demo-2", "demo:lofi", "demo-lofi"}:
         return demo_payload(DEMOS[1], request)
 
-    cached = _CACHE.get(url)
+    video_id = extract_video_id(url)
+    cached = CACHE.get(video_id) if video_id else None
+    if cached is None:
+        cached = CACHE.get(url)
+
     if cached is None:
         loop = asyncio.get_running_loop()
         try:
-            info = await loop.run_in_executor(None, _extract_blocking, url)
+            info = await loop.run_in_executor(None, extract_audio_data, url)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Could not read that video: {exc}") from exc
 
@@ -907,9 +955,13 @@ async def resolve(url: str, request: Request) -> Dict[str, Any]:
             "alternative_lyrics": formatted_alternatives,
             "source": "youtube",
         }
-        if len(_CACHE) > 64:
-            _CACHE.clear()
-        _CACHE[url] = cached
+        if len(CACHE) > 128:
+            CACHE.clear()
+        if video_id:
+            CACHE[video_id] = cached
+        if info.get("id"):
+            CACHE[info["id"]] = cached
+        CACHE[url] = cached
 
     payload = dict(cached)
     payload["audio_url"] = _proxy_url(cached["audio_source"], request)
